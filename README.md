@@ -13,7 +13,7 @@ The following is a diagram of the modeling framework of WCPN-FSL.
  - python = 3.8
  - pytorch = 1.7
 
-## dataset
+## Dataset
 You can download the hyperspectral image datasets from our disk link [https://pan.baidu.com/s/1rCwFENSSjqOvx8zgGS6LKg?pwd=axie ](https://pan.baidu.com/s/1rCwFENSSjqOvx8zgGS6LKg?pwd=axie), and move the files to `./datasets` folder.
 
 An example dataset folder has the following structure:
