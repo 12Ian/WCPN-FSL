@@ -168,8 +168,8 @@ del source_dataset, source_imdb
 
 ## target domain data set
 # load target domain data set
-test_data = '../datasets/paviau/paviaU.mat'
-test_label = '../datasets/paviau/paviaU_gt.mat'
+test_data = '../datasets/paviaU/paviaU.mat'
+test_label = '../datasets/paviaU/paviaU_gt.mat'
 
 Data_Band_Scaler, GroundTruth = utils.load_data(test_data, test_label)
 
