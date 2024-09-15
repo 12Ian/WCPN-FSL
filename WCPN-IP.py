@@ -61,6 +61,7 @@ if args.weight_tau:
 else:
     print('none')
 # Hyper Parameters
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 FEATURE_DIM = args.feature_dim
 SRC_INPUT_DIMENSION = args.src_input_dim
 TAR_INPUT_DIMENSION = args.tar_input_dim
@@ -83,7 +84,7 @@ AGG_METHOD = args.agg_method
 current_file_name = os.path.basename(__file__).split(".py")[0] + '-noise-{}'.format(args.noise) +\
                      '-agg-{}'.format(args.agg_method) + '-cl-{}'.format(args.weight_tau) + '-tau-{}'.format(args.tau)
 
-logging_file_dic = "./output3/" + current_file_name
+logging_file_dic = "./output7/" + current_file_name
 logging_file_name = logging_file_dic + "/" + current_file_name + ".log"
 
 if not os.path.exists(logging_file_dic):
@@ -286,7 +287,7 @@ def get_train_test_loader(Data_Band_Scaler, GroundTruth, class_num, shot_num_per
 def get_target_dataset(Data_Band_Scaler, GroundTruth, class_num, shot_num_per_class):
     train_loader, test_loader, imdb_da_train,G,RandPerm,Row, Column,nTrain = get_train_test_loader(Data_Band_Scaler=Data_Band_Scaler,  GroundTruth=GroundTruth, \
                                                                      class_num=class_num,shot_num_per_class=shot_num_per_class)  # 9 classes and 5 labeled samples per class
-    train_datas, train_labels = train_loader.__iter__().next()
+    train_datas, train_labels = train_loader.__iter__().__next__()
     print('train labels:', train_labels)
     print('size of train datas:', train_datas.shape) # size of train datas: torch.Size([45, 103, 9, 9])
 
@@ -383,11 +384,114 @@ class Mapping(nn.Module):
         x = self.preconv_bn(x)
         return x
 
+
+class SSRN(nn.Module):
+
+    def __init__(self, input_channels, patch_size, n_classes):
+        super(SSRN, self).__init__()
+        self.inplanes = 24
+        self.kernel_dim = 1
+        self.feature_dim = input_channels
+        self.sz = patch_size
+        # Convolution Layer 1 kernel_size = (1, 1, 7), stride = (1, 1, 2), output channels = 24
+        self.conv1 = nn.Conv3d(1, 24, kernel_size=(7, 1, 1), stride=(2, 1, 1), bias=True)
+        self.bn1 = nn.BatchNorm3d(24)
+        self.activation1 = nn.ReLU()
+
+        # Residual block 1
+        self.conv2 = nn.Conv3d(24, 24, kernel_size=(7, 1, 1), stride=1, padding=(3, 0, 0), padding_mode='replicate',
+                               bias=True)
+        self.bn2 = nn.BatchNorm3d(24)
+        self.activation2 = nn.ReLU()
+        self.conv3 = nn.Conv3d(24, 24, kernel_size=(7, 1, 1), stride=1, padding=(3, 0, 0), padding_mode='replicate',
+                               bias=True)
+        self.bn3 = nn.BatchNorm3d(24)
+        self.activation3 = nn.ReLU()
+        # Finish
+
+        # Convolution Layer 2 kernel_size = (1, 1, (self.feature_dim - 6) // 2), output channels = 128
+        self.conv4 = nn.Conv3d(24, 128, kernel_size=(((self.feature_dim - 7) // 2 + 1), 1, 1), bias=True)
+        self.bn5 = nn.BatchNorm3d(128)
+        self.activation5 = nn.ReLU()
+
+        # Convolution Layer 3 kernel_size = (3, 3, 128), output channels = 24
+        self.conv5 = nn.Conv3d(1, 24, kernel_size=(128, 3, 3), bias=True)
+        self.activation6 = nn.ReLU()
+        self.bn6 = nn.BatchNorm3d(24)
+
+        # Residual block 2
+        self.conv6 = nn.Conv2d(24, 24, kernel_size=3, stride=1, padding=1, padding_mode='replicate', bias=True)
+        self.bn7 = nn.BatchNorm2d(24)
+        self.activation7 = nn.ReLU()
+        self.conv7 = nn.Conv2d(24, 24, kernel_size=3, stride=1, padding=1, padding_mode='replicate', bias=True)
+        self.bn8 = nn.BatchNorm2d(24)
+        self.activation8 = nn.ReLU()
+        self.conv8 = nn.Conv2d(24, 24, kernel_size=1)
+        # Finish
+
+        # Average pooling kernel_size = (5, 5, 1)
+        self.avgpool = nn.AvgPool2d((self.sz - 2, self.sz - 2))
+
+        # Fully connected Layer
+        self.fc1 = nn.Linear(in_features=24, out_features=n_classes)
+        self.activation10 = nn.Softmax(dim=1)
+
+        # parameters initialization
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                torch.nn.init.kaiming_normal_(m.weight.data)
+                m.bias.data.zero_()
+            elif isinstance(m, nn.BatchNorm3d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+
+    def forward(self, x, bounds=None):
+
+        x = x.unsqueeze(1)
+        # Convolution layer 1
+        x = self.conv1(x)
+        x = self.activation1(self.bn1(x))
+
+        # Residual layer 1
+        residual = x
+        x = self.conv2(x)
+        x = self.activation2(self.bn2(x))
+        x = self.conv3(x)
+        x = residual + x
+        x = self.activation3(self.bn3(x))
+
+        # Convolution layer 2
+        x = self.conv4(x)
+        x = self.activation5(self.bn5(x))
+
+        # Reshape from (batch_size, nb_channels, 1, length_x, length_y, 1) to (batch_size, 1, length_x, length_y, nb_channels)
+        x = x.view((x.size(0), x.size(2), x.size(1), x.size(3), x.size(4)))
+
+        # Convolution layer 3
+        x = self.conv5(x)
+        x = self.activation6(self.bn6(x))
+        x = x.reshape(x.size(0), x.size(1), x.size(3), x.size(4))
+
+        # Residual layer 2
+        residual = x
+        residual = self.conv8(residual)
+        x = self.conv6(x)
+        x = self.activation7(self.bn7(x))
+        x = self.conv7(x)
+        x = residual + x
+
+        x = self.activation8(self.bn8(x))
+        x = self.avgpool(x)
+        x = x.reshape((x.size(0), -1))
+
+
+        return x
+
 class Network(nn.Module):
     def __init__(self):
         super(Network, self).__init__()
-        self.feature_encoder = D_Res_3d_CNN(1,8,16)
-        self.final_feat_dim = FEATURE_DIM  # 64+32
+        self.feature_encoder = SSRN(100, 9, 16)
+        self.final_feat_dim = 24  # 64+32
         #         self.bn = nn.BatchNorm1d(self.final_feat_dim)
         self.classifier = nn.Sequential(nn.Linear(in_features=self.final_feat_dim, out_features=80),
                                         nn.ReLU(),
@@ -426,8 +530,8 @@ def weights_init(m):
         if m.bias is not None:
             m.bias.data = torch.ones(m.bias.data.size())
 
-crossEntropy = nn.CrossEntropyLoss().cuda()
-domain_criterion = nn.BCEWithLogitsLoss().cuda()
+crossEntropy = nn.CrossEntropyLoss().to(device)
+domain_criterion = nn.BCEWithLogitsLoss().to(device)
 
 def euclidean_metric(a, b):
     n = a.shape[0]
@@ -448,7 +552,7 @@ class ContrastiveLoss(nn.Module):
         similarity_matrix = euclidean_metric(representations, representations) # simi_mat: (2*bs, 2*bs)
 
         num_sample = labels.shape[0]
-        mask = torch.zeros(num_sample, num_sample,  dtype=float).cuda()
+        mask = torch.zeros(num_sample, num_sample,  dtype=float).to(device)
         for i in range(num_sample):
             for j in range(num_sample):
                 mask[i, j] = 1.0 if labels[i] == labels[j] else 0.0
@@ -472,7 +576,7 @@ class ContrastiveLossWeight(nn.Module):
 
         #正则化选择
         num_sample = labels.shape[0]
-        mask = torch.zeros(num_sample, num_sample, dtype=float).cuda()
+        mask = torch.zeros(num_sample, num_sample, dtype=float).to(device)
         pair_positive = (1 - args.tau) /SHOT_NUM_PER_CLASS
         for i in range(num_sample):
             for j in range(num_sample):
@@ -480,6 +584,9 @@ class ContrastiveLossWeight(nn.Module):
                     mask[i, j] = 1.0
                 else:
                     mask[i,j] = 0.0
+
+        # mask = (labels == labels.t()).float()
+        # mask.fill_diagonal_(0.0)
 
         nominator = torch.exp(similarity_matrix / self.temperature)  # 2*bs
         denominator = torch.sum(torch.exp(similarity_matrix / self.temperature), dim=1)  # 2*bs, 2*bs
@@ -490,11 +597,11 @@ class ContrastiveLossWeight(nn.Module):
 
 
 if args.weight_tau:
-    infoNCE_Loss = ContrastiveLossWeight().cuda()
+    infoNCE_Loss = ContrastiveLossWeight().to(device)
 else:
-    infoNCE_Loss = ContrastiveLoss().cuda()
+    infoNCE_Loss = ContrastiveLoss().to(device)
 # run 10 times
-nDataSet = 1
+nDataSet = 10
 acc = np.zeros([nDataSet, 1])
 A = np.zeros([nDataSet, CLASS_NUM])
 k = np.zeros([nDataSet, 1])
@@ -514,7 +621,7 @@ for iDataSet in range(nDataSet):
     # model
     feature_encoder = Network()
     feature_encoder.apply(weights_init)
-    feature_encoder.cuda()
+    feature_encoder.to(device)
     feature_encoder.train()
     # optimizer
     feature_encoder_optim = torch.optim.Adam(feature_encoder.parameters(), lr=args.learning_rate)
@@ -545,17 +652,17 @@ for iDataSet in range(nDataSet):
             query_dataloader = utils.get_HBKC_data_loader(task, num_per_class=QUERY_NUM_PER_CLASS, split="test", shuffle=False)
 
             # sample datas
-            supports, support_labels = support_dataloader.__iter__().next()  # (5, 100, 9, 9)
-            querys, query_labels = query_dataloader.__iter__().next()  # (75,100,9,9)
+            supports, support_labels = support_dataloader.__iter__().__next__()  # (5, 100, 9, 9)
+            querys, query_labels = query_dataloader.__iter__().__next__()  # (75,100,9,9)
             supports_1 = supports[0:CLASS_NUM * 2:2, :, :, :]
             supports_2 = supports[1:CLASS_NUM * 2:2, :, :, :]
             # calculate features
             # print(supports.size())
-            support_features, support_outputs = feature_encoder(supports.cuda())  # torch.Size([409, 32, 7, 3, 3])
-            support_features_1, _ = feature_encoder(supports_1.cuda())
-            support_features_2, _ = feature_encoder(supports_2.cuda())
-            query_features, query_outputs = feature_encoder(querys.cuda())  # torch.Size([409, 32, 7, 3, 3])
-            labels_proto = torch.tensor([x for x in range(CLASS_NUM) for _ in range(SHOT_NUM_PER_CLASS)]).cuda()
+            support_features, support_outputs = feature_encoder(supports.to(device))  # torch.Size([409, 32, 7, 3, 3])
+            support_features_1, _ = feature_encoder(supports_1.to(device))
+            support_features_2, _ = feature_encoder(supports_2.to(device))
+            query_features, query_outputs = feature_encoder(querys.to(device))  # torch.Size([409, 32, 7, 3, 3])
+            labels_proto = torch.tensor([x for x in range(CLASS_NUM) for _ in range(SHOT_NUM_PER_CLASS)]).to(device)
 
 
             query_weights = torch.tensor([])
@@ -570,7 +677,7 @@ for iDataSet in range(nDataSet):
                                                                                               agg_method=AGG_METHOD)
                 # s-fsl_loss
                 logits = euclidean_metric(query_features, support_proto)
-                f_loss = crossEntropy(logits, query_labels.long().cuda())
+                f_loss = crossEntropy(logits, query_labels.long().to(device))
                 # q-fsl-loss                                                            agg_method=AGG_METHOD)
                 #                 support_proto = utils.gen_prototypes_one(support_features, CLASS_NUM, SHOT_NUM_PER_CLASS,
                 #
@@ -585,7 +692,7 @@ for iDataSet in range(nDataSet):
                                                                    agg_method=AGG_METHOD)
                 # s-fsl_loss
                 logits = euclidean_metric(query_features, support_proto) * query_weights
-                f_loss = crossEntropy(logits, query_labels.long().cuda())
+                f_loss = crossEntropy(logits, query_labels.long().to(device))
                 # q-fsl-loss
                 logits_pro = euclidean_metric(support_features, query_proto) * support_weights
                 proto_loss = crossEntropy(logits_pro, labels_proto)
@@ -603,7 +710,7 @@ for iDataSet in range(nDataSet):
             loss.backward()
             feature_encoder_optim.step()
 
-            total_hit += torch.sum(torch.argmax(logits.cuda(), dim=1).cpu() == query_labels).item()
+            total_hit += torch.sum(torch.argmax(logits.to(device), dim=1).cpu() == query_labels).item()
             total_num += querys.shape[0]
         # target domain few-shot + domain adaptation
         else:
@@ -615,17 +722,17 @@ for iDataSet in range(nDataSet):
 
 
             # sample datas
-            supports, support_labels = support_dataloader.__iter__().next()  # (5, 100, 9, 9)
-            querys, query_labels = query_dataloader.__iter__().next()  # (75,100,9,9)
+            supports, support_labels = support_dataloader.__iter__().__next__()  # (5, 100, 9, 9)
+            querys, query_labels = query_dataloader.__iter__().__next__()  # (75,100,9,9)
             supports_1 = supports[0:CLASS_NUM * 2:2, :, :, :]
             supports_2 = supports[1:CLASS_NUM * 2:2, :, :, :]
             # calculate features
             # print(supports.size())
-            support_features, support_outputs = feature_encoder(supports.cuda(),domain='target')  # torch.Size([409, 32, 7, 3, 3])
-            support_features_1, _ = feature_encoder(supports_1.cuda(), domain='target')
-            support_features_2, _ = feature_encoder(supports_2.cuda(), domain='target')
-            query_features, query_outputs = feature_encoder(querys.cuda(), domain='target')  # torch.Size([409, 32, 7, 3, 3])
-            labels_proto = torch.tensor([x for x in range(CLASS_NUM) for _ in range(SHOT_NUM_PER_CLASS)]).cuda()
+            support_features, support_outputs = feature_encoder(supports.to(device),domain='target')  # torch.Size([409, 32, 7, 3, 3])
+            support_features_1, _ = feature_encoder(supports_1.to(device), domain='target')
+            support_features_2, _ = feature_encoder(supports_2.to(device), domain='target')
+            query_features, query_outputs = feature_encoder(querys.to(device), domain='target')  # torch.Size([409, 32, 7, 3, 3])
+            labels_proto = torch.tensor([x for x in range(CLASS_NUM) for _ in range(SHOT_NUM_PER_CLASS)]).to(device)
 
             query_weights = torch.tensor([])
             support_weights = torch.tensor([])
@@ -638,7 +745,7 @@ for iDataSet in range(nDataSet):
                                                          agg_method=AGG_METHOD)
                 # s-fsl_loss
                 logits = euclidean_metric(query_features, support_proto)
-                f_loss = crossEntropy(logits, query_labels.long().cuda())
+                f_loss = crossEntropy(logits, query_labels.long().to(device))
                 # q-fsl-loss                                                            agg_method=AGG_METHOD)
                 #                 support_proto = utils.gen_prototypes_one(support_features, CLASS_NUM, SHOT_NUM_PER_CLASS,
                 #
@@ -653,7 +760,7 @@ for iDataSet in range(nDataSet):
                                                                               agg_method=AGG_METHOD)
                 # s-fsl_loss
                 logits = euclidean_metric(query_features, support_proto) * query_weights
-                f_loss = crossEntropy(logits, query_labels.long().cuda())
+                f_loss = crossEntropy(logits, query_labels.long().to(device))
                 # q-fsl-loss
                 logits_pro = euclidean_metric(support_features, query_proto) * support_weights
                 proto_loss = crossEntropy(logits_pro, labels_proto)
@@ -705,8 +812,8 @@ for iDataSet in range(nDataSet):
             predict = np.array([], dtype=np.int64)
             labels = np.array([], dtype=np.int64)
 
-            train_datas, train_labels = train_loader.__iter__().next()
-            train_features, _ = feature_encoder(Variable(train_datas).cuda(), domain='target')  # (45, 160)
+            train_datas, train_labels = train_loader.__iter__().__next__()
+            train_features, _ = feature_encoder(Variable(train_datas).to(device), domain='target')  # (45, 160)
 
             max_value = train_features.max()  # 89.67885
             min_value = train_features.min()  # -57.92479
@@ -719,7 +826,7 @@ for iDataSet in range(nDataSet):
             for test_datas, test_labels in test_loader:
                 batch_size = test_labels.shape[0]
 
-                test_features, _ = feature_encoder(Variable(test_datas).cuda(), domain='target')  # (100, 160)
+                test_features, _ = feature_encoder(Variable(test_datas).to(device), domain='target')  # (100, 160)
                 test_features = (test_features - min_value) * 1.0 / (max_value - min_value)
                 predict_labels = KNN_classifier.predict(test_features.cpu().detach().numpy())
                 test_labels = test_labels.numpy()
